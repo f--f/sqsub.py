@@ -7,7 +7,7 @@ import string
 from daemon import Daemon
 
 # Modify these parameters accordingly
-DEFAULT_SQSUB_ARGS = ['-q','chemeng','-f','mpi','-f','opteron','-r','14d'] # Include these sqsub arguments automatically
+DEFAULT_SQSUB_ARGS = ['-q','chemeng','-f','mpi','-r','14d'] # Include these sqsub arguments automatically
 TIME_DEAD = 60.*90. # Max time (secs) between log updates, above which job is assumed to be frozen and is restarted automatically
 WAIT_TIME = 15. # Seconds between polling for changes in job state
 DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER")) # Directory to store PID information

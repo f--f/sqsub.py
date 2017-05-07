@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 __doc__ = """Wrapper around default sqsub command on SHARCNET.
-Usage: 
+Usage:
 
 Features:
 - Sends e-mail message when job is finished.
@@ -12,37 +12,39 @@ import os
 import time
 import sys
 import subprocess
-import string
 from daemon import Daemon
 
 # Modify these parameters accordingly
 DEFAULT_SQSUB_ARGS = ['-q', 'chemeng', '-f', 'mpi', '-r', '14d']
-TIME_DEAD = 60.*90.  # A job is considered frozen if its log was last updated above this limit.
+# A job is considered frozen if its log was last updated above this limit.
+TIME_DEAD = 60. * 90.
 POLL_INTERVAL_SEC = 15.  # Seconds between polling for changes in job state
-DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER"))  # Directory to store PID information
-EMAIL_COMMAND = r'cat %s | ssh orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
+# Directory to store PID information
+DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER"))
+EMAIL_COMMAND = r'cat %s | ' \
+    'ssh orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
 
 
 def get_offline_nodes(nodes_list):
-    """Ping nodes. Returns None if OK; otherwise returns the first bad (offline) node."""
+    """Ping list of nodes and returns offline nodes (from failed pings)."""
     offline_nodes = []
     for node in nodes_list:
         try:
-            tmp = subprocess.check_output(["ping", "-c", "1", node])
+            subprocess.check_output(["ping", "-c", "1", node])
         except subprocess.CalledProcessError:
             offline_nodes.append(node)
     return offline_nodes
 
 
 def submit_job(args):
-    """Submit a job and return job ID if successful, otherwise None. 
+    """Submit a job and return job ID if successful, otherwise None.
     This is a wrapper around sqsub.
 
     Args:
         args: string containing arguments to sqsub.
     Returns:
         Returns the submitted job's ID. This corresponds to the final "word" in
-        the output from sqsub after a successful submit. 
+        the output from sqsub after a successful submit.
         If submission was unsucessful, return"""
 
     args = ["sqsub"] + args
@@ -80,7 +82,7 @@ class Job():
     def query(self, att):
         """Return output from sqjobs on this job for a single attribute."""
         stat = subprocess.check_output(['sqjobs', '-l', self.id]).split()
-        return stat[stat.index(att)+1]
+        return stat[stat.index(att) + 1]
 
     def refresh_log_path(self):
         logfile = self.query("file:")
@@ -127,7 +129,7 @@ class JobTracker(Daemon):
 
     def run(self):
         """start the daemon"""
-        
+
         # Wait for job to start running (state = R, generate log file)
         while not self.job.state == "R" or not os.path.isfile(self.job.log):
             self.out("Waiting for log file ({}) and/or job state ({})...".

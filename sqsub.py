@@ -1,4 +1,5 @@
-"""Wrapper around default sqsub command on SHARCNET.
+#!/usr/bin/env python
+__doc__ = """Wrapper around default sqsub command on SHARCNET.
 Usage: 
 
 Features:
@@ -22,7 +23,7 @@ DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER"))  # Dire
 EMAIL_COMMAND = r'cat %s | ssh -t orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
 
 
-def check_offline_nodes(self, nodes_list):
+def check_offline_nodes(nodes_list):
     """Ping nodes. Returns None if OK; otherwise returns the first bad (offline) node."""
     offline_nodes = []
     for node in nodes_list:
@@ -63,11 +64,13 @@ class JobTracker(Daemon):
 
     def run(self):
         """start the daemon"""
-        # First wait for log file to be created / job to finish queueing
-        while self.job_state() == "Q" or not os.path.isfile(self.logfile):
+        # First wait for log file to be created and for job to finish queueing
+        while not self.job_state() == "R" or not os.path.isfile(self.logfile):
             self.out("Waiting for log file ({}) and/or job state ({})...".format(os.path.isfile(self.logfile), self.job_state()))
             time.sleep(POLL_INTERVAL_SEC)
-        # Get list of nodes once job has started. If job is dead at this point, it will return empty list (not a big deal)
+
+        # Get list of nodes once job has started.
+        time.sleep(POLL_INTERVAL_SEC)
         self.nodes = subprocess.check_output("sqhosts | grep %s | awk '{print $1}'" % self.jobid, shell=True).split()
         self.out("Job started. Running on nodes: {}".format(self.nodes))
         # Once log file is created, continuously check whether job is frozen

@@ -34,6 +34,27 @@ def check_offline_nodes(nodes_list):
     return offline_nodes
 
 
+def submit_job(args):
+    """Submit a job and return job ID if successful, otherwise None. 
+    This is a wrapper around sqsub.
+
+    Args:
+        args: string containing arguments to sqsub.
+    Returns:
+        Returns the submitted job's ID. This corresponds to the final "word" in
+        the output from sqsub after a successful submit. 
+        If submission was unsucessful, return"""
+
+    args = ["sqsub"] + args
+    try:
+        output = subprocess.check_output(args)
+    except subprocess.CalledProcessError:
+        print "Job submission exited with non-zero status. Bad arguments?"
+        return None
+
+    return output.split()[-1]
+
+
 class JobTracker(Daemon):
     """Daemon object which tracks the status of a single job.
 
@@ -102,21 +123,10 @@ class JobTracker(Daemon):
 
 if __name__ == "__main__":
 
-    # Attempt to submit job (concatenate arguments)
-    args = ["sqsub"] + DEFAULT_SQSUB_ARGS + sys.argv[1:]
-    print "Command:", string.join(args)
-    try:
-        output = subprocess.check_output(args)
-    except subprocess.CalledProcessError:
-        print "Job submission exited with non-zero status. Bad job submission?"
-        sys.exit()
-
-    jobid = output.split()[-1]
+    print "Request: sqsub", DEFAULT_SQSUB_ARGS + sys.argv[1:]
+    jobid = submit_job(DEFAULT_SQSUB_ARGS + sys.argv[1:])
+    assert jobid is not None, "Job did not submit successfully - check args?"
     print "Job submitted. Job ID:", jobid
-    # Check if job submission was valid based on whether ID is a number
-    if not jobid.isdigit():
-        print "Invalid Job ID returned. Job may have not submitted successfully. Exiting..."
-        sys.exit()
 
     # Use sqjobs to get absolute path of the log file
     sqjobs = subprocess.check_output(['sqjobs', '-l', jobid]).split()

@@ -20,10 +20,10 @@ DEFAULT_SQSUB_ARGS = ['-q', 'chemeng', '-f', 'mpi', '-r', '14d']
 TIME_DEAD = 60.*90.  # A job is considered frozen if its log was last updated above this limit.
 POLL_INTERVAL_SEC = 15.  # Seconds between polling for changes in job state
 DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER"))  # Directory to store PID information
-EMAIL_COMMAND = r'cat %s | ssh -t orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
+EMAIL_COMMAND = r'cat %s | ssh orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
 
 
-def check_offline_nodes(nodes_list):
+def get_offline_nodes(nodes_list):
     """Ping nodes. Returns None if OK; otherwise returns the first bad (offline) node."""
     offline_nodes = []
     for node in nodes_list:
@@ -48,100 +48,145 @@ def submit_job(args):
     args = ["sqsub"] + args
     try:
         output = subprocess.check_output(args)
+        jobid = output.split()[-1]
     except subprocess.CalledProcessError:
         print "Job submission exited with non-zero status. Bad arguments?"
         return None
 
-    return output.split()[-1]
+    return Job(jobid)
+
+
+class Job():
+    """Job class. Represents a single job.
+    Queries job status from sqjobs once when created.
+
+    Attributes:
+        jobid (str): Job ID.
+        logfile (str): Path to log file for job.
+        nodes (list of int): List of nodes the job is running on.
+        state (str): either 'Q' queued, 'R' running, or 'D' dead.
+    """
+
+    def __init__(self, jobid):
+        self.id = jobid
+        self.log = None
+        self.state = None
+        self.nodes = []
+
+        self.refresh_log_path()
+        self.refresh_job_state()
+        self.refresh_nodes()
+
+    def query(self, att):
+        """Return output from sqjobs on this job for a single attribute."""
+        stat = subprocess.check_output(['sqjobs', '-l', self.id]).split()
+        return stat[stat.index(att)+1]
+
+    def refresh_log_path(self):
+        logfile = self.query("file:")
+        # If %J was used in the logfile, replace it with the actual job id
+        if "${PBS_JOBID}" in logfile:
+            print "Replace job id in log file name..."
+            qstat = subprocess.check_output(['qstat', '-f', self.id]).split()
+            logfile = logfile.replace("${PBS_JOBID}", qstat[2])
+        self.log = logfile
+
+    def refresh_job_state(self):
+        self.state = self.query("state:")
+
+    def refresh_nodes(self):
+        self.nodes = subprocess.check_output(
+            "sqhosts | grep %s | awk '{print $1}'" % self.id,
+            shell=True).split()
 
 
 class JobTracker(Daemon):
     """Daemon object which tracks the status of a single job.
+    Relies on Job class to query job status.
 
-    Attributes: 
-        jobid (str): Job ID. 
-        logfile (str): Path to log file for job.
-        nodes (list of int): List of nodes the job is running on.
+    Attributes:
+        job: Job object.
     """
 
-    def __init__(self, jobid, logfile, stdout):
-        pidfile = os.path.join(DAEMON_PID_PATH, jobid)
+    def __init__(self, job, stdout):
+        pidfile = os.path.join(DAEMON_PID_PATH, job.id)
         Daemon.__init__(self, pidfile, stdout=stdout, stderr=stdout)
-        self.jobid = jobid
-        self.logfile = logfile
-        self.nodes = []
-
-    def job_state(self):
-        """get job state (Q/R/D) from sqjobs"""
-        sqjobs = subprocess.check_output(['sqjobs', '-l', self.jobid]).split()
-        return sqjobs[sqjobs.index("state:")+1]
+        self.job = job
 
     def time_since_log_modified(self):
         """get time since log file was last modified in seconds"""
-        return time.time() - os.path.getmtime(self.logfile)
+        return time.time() - os.path.getmtime(self.job.log)
 
     def out(self, message):
-        print self.jobid + " | " + time.strftime("%b%d %H:%M:%S") + " :", message
+        """write to stdout"""
+        print self.job.id, "|", time.strftime("%b%d %H:%M:%S"), ":", message
+
+    def email(self, message):
+        """send e-mail with message in subject line"""
+        os.system(EMAIL_COMMAND % (self.job.log, self.job.id + "|" + message))
 
     def run(self):
         """start the daemon"""
-        # First wait for log file to be created and for job to finish queueing
-        while not self.job_state() == "R" or not os.path.isfile(self.logfile):
-            self.out("Waiting for log file ({}) and/or job state ({})...".format(os.path.isfile(self.logfile), self.job_state()))
+        
+        # Wait for job to start running (state = R, generate log file)
+        while not self.job.state == "R" or not os.path.isfile(self.job.log):
+            self.out("Waiting for log file ({}) and/or job state ({})...".
+                     format(os.path.isfile(self.job.log), self.job.state))
+            self.job.refresh_job_state()
+            self.job.refresh_log_path()
             time.sleep(POLL_INTERVAL_SEC)
 
         # Get list of nodes once job has started.
         time.sleep(POLL_INTERVAL_SEC)
-        self.nodes = subprocess.check_output("sqhosts | grep %s | awk '{print $1}'" % self.jobid, shell=True).split()
-        self.out("Job started. Running on nodes: {}".format(self.nodes))
+        self.job.refresh_nodes()
+
+        self.out("Job started. Running on nodes: {}".format(self.job.nodes))
         # Once log file is created, continuously check whether job is frozen
-        frozen_notification = False
+        frozen_note = False
+
         while True:
-            self.out("Seconds since log was last modified: {}".format(self.time_since_log_modified()))
+            self.out("Seconds since log was last modified: {}".format(
+                self.time_since_log_modified()))
+            self.job.refresh_job_state()
+
             # Check if job is dead
-            if self.job_state() == "D":
+            if self.job.state == "D":
                 self.out("Job state is D (finished/dead), exiting...")
-                os.system(EMAIL_COMMAND % (self.logfile, self.jobid + " | JOB ENDED | $(date)"))
+                self.email("JOB ENDED")
                 break
-                # Ping nodes, check if down
-                offline_nodes = check_offline_nodes(self.nodes)
-                if len(offline_nodes) > 0:
-                    self.out("A node seems to be offline, exiting...")
-                    os.system(EMAIL_COMMAND % (self.logfile, self.jobid + " | NODE FAILURE | $(date)"))
-                    break
+
+            # Ping nodes, check if a node is down
+            if len(get_offline_nodes(self.job.nodes)) > 0:
+                self.out("A node seems to be offline, exiting...")
+                self.email("NODE FAILURE")
+                break
+
             # If log file hasn't updated in a while, send e-mail
-            if self.time_since_log_modified() > TIME_DEAD and not frozen_notification:
+            if self.time_since_log_modified() > TIME_DEAD and not frozen_note:
                 self.out("Job seems to be frozen?")
-                os.system(EMAIL_COMMAND % (self.logfile, self.jobid + " | FROZEN JOB ? | $(date)"))
-                frozen_notification = True
-                # Don't exit yet; keep going in case job continues (so another notification is sent on job death)
+                self.email("FROZEN JOB?")
+                frozen_note = True
+                # Don't exit yet; keep going in case job continues
+                # (so that another notification is sent on job death, etc.)
+
             time.sleep(POLL_INTERVAL_SEC)
+
         self.out("Stopping daemon for this job...")
         self.stop()
-        sys.exit()  # This stops the daemon and deletes the pidfile
+        self.delpid()
 
 
 if __name__ == "__main__":
 
     print "Request: sqsub", DEFAULT_SQSUB_ARGS + sys.argv[1:]
-    jobid = submit_job(DEFAULT_SQSUB_ARGS + sys.argv[1:])
-    assert jobid is not None, "Job did not submit successfully - check args?"
-    print "Job submitted. Job ID:", jobid
-
-    # Use sqjobs to get absolute path of the log file
-    sqjobs = subprocess.check_output(['sqjobs', '-l', jobid]).split()
-    logfile = sqjobs[sqjobs.index("file:")+1]
-    # If %J was used in the logfile, then replace it with the actual job id (from qstat)
-    if "${PBS_JOBID}" in logfile:
-        print "Replace job id in log file name..."
-        qstat = subprocess.check_output(['qstat', '-f', jobid]).split()
-        logfile = logfile.replace("${PBS_JOBID}", qstat[2])
-    print "Log file:", logfile
+    myjob = submit_job(DEFAULT_SQSUB_ARGS + sys.argv[1:])
+    assert myjob is not None, "Job did not submit successfully - check args?"
+    print "Job submitted. Job ID:", myjob.id
 
     # Start daemon
     if not os.path.exists(DAEMON_PID_PATH):
         os.makedirs(DAEMON_PID_PATH)
     stdout = os.path.join(DAEMON_PID_PATH, "tracker_log.txt")
     print "Starting daemon. Output log is in {}".format(stdout)
-    daemon = JobTracker(jobid, logfile, stdout)
+    daemon = JobTracker(myjob, stdout)
     daemon.start()

@@ -69,7 +69,7 @@ class JobTracker(Daemon):
             time.sleep(POLL_INTERVAL_SEC)
         # Get list of nodes once job has started. If job is dead at this point, it will return empty list (not a big deal)
         self.nodes = subprocess.check_output("sqhosts | grep %s | awk '{print $1}'" % self.jobid, shell=True).split()
-        self.out("Job started. Running on nodes: {}".format(nodes_list))
+        self.out("Job started. Running on nodes: {}".format(self.nodes))
         # Once log file is created, continuously check whether job is frozen
         frozen_notification = False
         while True:

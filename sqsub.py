@@ -1,4 +1,5 @@
 """Wrapper around default sqsub command on SHARCNET.
+Usage: 
 
 Features:
 - Sends e-mail message when job is finished.
@@ -15,10 +16,21 @@ from daemon import Daemon
 
 # Modify these parameters accordingly
 DEFAULT_SQSUB_ARGS = ['-q', 'chemeng', '-f', 'mpi', '-r', '14d']
-TIME_DEAD = 60.*90.  # Max time (secs) between log updates, above which job is assumed to be frozen and is restarted automatically
+TIME_DEAD = 60.*90.  # A job is considered frozen if its log was last updated above this limit.
 POLL_INTERVAL_SEC = 15.  # Seconds between polling for changes in job state
 DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER"))  # Directory to store PID information
 EMAIL_COMMAND = r'cat %s | ssh -t orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
+
+
+def check_offline_nodes(self, nodes_list):
+    """Ping nodes. Returns None if OK; otherwise returns the first bad (offline) node."""
+    offline_nodes = []
+    for node in nodes_list:
+        try:
+            tmp = subprocess.check_output(["ping", "-c", "1", node])
+        except subprocess.CalledProcessError:
+            offline_nodes.append(node)
+    return offline_nodes
 
 
 class JobTracker(Daemon):
@@ -27,6 +39,7 @@ class JobTracker(Daemon):
     Attributes: 
         jobid (str): Job ID. 
         logfile (str): Path to log file for job.
+        nodes (list of int): List of nodes the job is running on.
     """
 
     def __init__(self, jobid, logfile, stdout):
@@ -34,6 +47,7 @@ class JobTracker(Daemon):
         Daemon.__init__(self, pidfile, stdout=stdout, stderr=stdout)
         self.jobid = jobid
         self.logfile = logfile
+        self.nodes = []
 
     def job_state(self):
         """get job state (Q/R/D) from sqjobs"""
@@ -42,12 +56,7 @@ class JobTracker(Daemon):
 
     def time_since_log_modified(self):
         """get time since log file was last modified in seconds"""
-        return time.time() - os.path.getmtime(logfile)
-
-    def offline_nodes(self, nodes_list):
-        """Ping nodes. Returns None if OK; otherwise returns the first bad (offline) node."""
-        for node in nodes_list:
-            tmp = subprocess.check_output(["ping", "-c", "1", node])
+        return time.time() - os.path.getmtime(self.logfile)
 
     def out(self, message):
         print self.jobid + " | " + time.strftime("%b%d %H:%M:%S") + " :", message
@@ -59,7 +68,7 @@ class JobTracker(Daemon):
             self.out("Waiting for log file ({}) and/or job state ({})...".format(os.path.isfile(self.logfile), self.job_state()))
             time.sleep(POLL_INTERVAL_SEC)
         # Get list of nodes once job has started. If job is dead at this point, it will return empty list (not a big deal)
-        nodes_list = subprocess.check_output("sqhosts | grep %s | awk '{print $1}'" % self.jobid, shell=True).split()
+        self.nodes = subprocess.check_output("sqhosts | grep %s | awk '{print $1}'" % self.jobid, shell=True).split()
         self.out("Job started. Running on nodes: {}".format(nodes_list))
         # Once log file is created, continuously check whether job is frozen
         frozen_notification = False
@@ -70,14 +79,12 @@ class JobTracker(Daemon):
                 self.out("Job state is D (finished/dead), exiting...")
                 os.system(EMAIL_COMMAND % (self.logfile, self.jobid + " | JOB ENDED | $(date)"))
                 break
-            # Ping nodes, check if down
-            try:
-                self.offline_nodes(nodes_list)
-                self.out("Successfully pinged nodes: {}".format(nodes_list))
-            except subprocess.CalledProcessError:
-                self.out("A node seems to be offline, exiting...")
-                os.system(EMAIL_COMMAND % (self.logfile, self.jobid + " | NODE FAILURE | $(date)"))
-                break
+                # Ping nodes, check if down
+                offline_nodes = check_offline_nodes(self.nodes)
+                if len(offline_nodes) > 0:
+                    self.out("A node seems to be offline, exiting...")
+                    os.system(EMAIL_COMMAND % (self.logfile, self.jobid + " | NODE FAILURE | $(date)"))
+                    break
             # If log file hasn't updated in a while, send e-mail
             if self.time_since_log_modified() > TIME_DEAD and not frozen_notification:
                 self.out("Job seems to be frozen?")

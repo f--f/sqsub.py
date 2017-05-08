@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-__doc__ = """Wrapper around default sqsub command on SHARCNET.
+__doc__ = """Wrapper around default sqsub command on SHARCNET with some
+added convenience features.
 Usage:
 
 Features:
-- Sends e-mail message when job is finished.
-- Checks if job is frozen in run state (e.g. node crash) using log file
-- Allows default arguments to sqsub to be set (for convenience).
+- Checks if job is frozen in run state (e.g. node crash) using log file.
+- Sends e-mail message to user when job is finished / crashed.
+- Allows default flags to sqsub to be set, but these can be overwritten
+  by specifying them explicitly.
 """
 
 import os
@@ -15,14 +17,15 @@ import subprocess
 from daemon import Daemon
 
 # Modify these parameters accordingly
-DEFAULT_SQSUB_ARGS = ['-q', 'chemeng', '-f', 'mpi', '-r', '14d']
+DEFAULT_SQSUB_ARGS = {'-q': 'chemeng', '-f': 'mpi', '-r': '14d',
+                      '--mpp=3.9g': None}
 # A job is considered frozen if its log was last updated above this limit.
 TIME_DEAD = 60. * 90.
 POLL_INTERVAL_SEC = 15.  # Seconds between polling for changes in job state
 # Directory to store PID information
 DAEMON_PID_PATH = "/chemeng/{user}/.pid/".format(user=os.getenv("USER"))
-EMAIL_COMMAND = r'cat %s | ' \
-    'ssh orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'
+EMAIL_COMMAND = r'''tail -n 40 %s |
+    ssh orca "mail -s \"%s\" ${USER}@detritus.sharcnet.ca"'''
 
 
 def get_offline_nodes(nodes_list):
@@ -36,12 +39,28 @@ def get_offline_nodes(nodes_list):
     return offline_nodes
 
 
+def args_with_defaults(default_args, cli_args):
+    """Inserts the specified default flags into the job submission. If a
+    flag has already specified through CLI, it is not overwritten with the
+    default-specified parameter."""
+    final_args = cli_args
+    # Loop through default args. If not in CLI args already, then add to final
+    # set of args.
+    for arg in default_args.keys():
+        if arg not in cli_args:
+            # Insert at 0 position to avoid conflicts with job itself
+            if default_args[arg] is not None:
+                cli_args.insert(0, default_args[arg])
+            cli_args.insert(0, arg)
+    return final_args
+
+
 def submit_job(args):
     """Submit a job and return job ID if successful, otherwise None.
     This is a wrapper around sqsub.
 
     Args:
-        args: string containing arguments to sqsub.
+        args: list of strings containing arguments to sqsub.
     Returns:
         Returns the submitted job's ID. This corresponds to the final "word" in
         the output from sqsub after a successful submit.
@@ -52,7 +71,6 @@ def submit_job(args):
         output = subprocess.check_output(args)
         jobid = output.split()[-1]
     except subprocess.CalledProcessError:
-        print "Job submission exited with non-zero status. Bad arguments?"
         return None
 
     return Job(jobid)
@@ -65,7 +83,7 @@ class Job():
     Attributes:
         jobid (str): Job ID.
         logfile (str): Path to log file for job.
-        nodes (list of int): List of nodes the job is running on.
+        nodes (list of str): List of nodes the job is running on.
         state (str): either 'Q' queued, 'R' running, or 'D' dead.
     """
 
@@ -175,13 +193,14 @@ class JobTracker(Daemon):
 
         self.out("Stopping daemon for this job...")
         self.stop()
-        self.delpid()
 
 
 if __name__ == "__main__":
 
-    print "Request: sqsub", DEFAULT_SQSUB_ARGS + sys.argv[1:]
-    myjob = submit_job(DEFAULT_SQSUB_ARGS + sys.argv[1:])
+    # Submit job
+    job_arguments = args_with_defaults(DEFAULT_SQSUB_ARGS, sys.argv[1:])
+    print "Request: sqsub", ' '.join(job_arguments)
+    myjob = submit_job(job_arguments)
     assert myjob is not None, "Job did not submit successfully - check args?"
     print "Job submitted. Job ID:", myjob.id
 
